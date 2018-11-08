@@ -96,6 +96,7 @@ short courseIndex; //An index into the current position through the course array
 boolean executing; //Blocking boolean to prevent more than one path segment being active/called. Stops loop() "outpacing" other executing methods
 long requiredEnc1Count; //Desired encoder 1 count for each path segment. Needs to be long as enc count can be up to 32bit
 MotionType currentMotion; //Current motion type the robot is undergoing
+bool timeBased = false; //Change turn modes to measure based on time rather than encoder count if needed
 
 /* Dropper definitions */
 Servo dropperServo;
@@ -131,9 +132,10 @@ void setup() {
 void loop() {
   //Minimise blocking on loop()
   if (!executing) {
+    //Check if robot is currently stopped
     if (currentMotion == Stop) {
       Serial.println((String)"Executing course idx " + courseIndex);
-      setCmd(rstEnc);
+      setCmd(rstEnc); //Reset encoders
       executing = true;
       executePath(course[courseIndex]);
     } else {
@@ -312,17 +314,19 @@ void setPointTurn(int degToTurn, bool clockwise) {
   }
   Serial.println((String)"Point Turn RE1C " + requiredEnc1Count);
 
-  //  if(timeBased){
-  //    int timeOn = dist / maxSpeedMps;
-  //    //Stop Motors
-  //    Wire.beginTransmission(addr);
-  //    Wire.write(speed1Reg);
-  //    Wire.write(STOP_SPEED);
-  //    Wire.write(speed2Reg);
-  //    Wire.write(STOP_SPEED);
-  //    delay(timeOn);// Delay turning motors off to achieve desired angle
-  //    Wire.endTransmission();
-  //  }
+    if(timeBased){
+      int timeOn = 1000 * dist / maxSpeedMps;
+      delay(timeOn);// Delay turning motors off to achieve desired angle
+      //Stop Motors
+      Wire.beginTransmission(addr);
+      Wire.write(speed1Reg);
+      Wire.write(STOP_SPEED);
+      Wire.endTransmission();
+      Wire.beginTransmission(addr);
+      Wire.write(speed2Reg);
+      Wire.write(STOP_SPEED);
+      Wire.endTransmission();
+    }
   executing = false;
 }
 
@@ -360,19 +364,22 @@ void setArcTurn(float arcRadius, bool clockwise, int angle) {
     Wire.endTransmission();
   }
   Serial.println((String)"Arc Turn RE1C " + requiredEnc1Count);
-  //
-  //  if(timeBased){
-  //    float midSpeed = (innerSpeedMps + maxSpeedMps) / 2;
-  //    long timeOn = distance / midSpeed;
-  //    //Stop Motors
-  //    Wire.beginTransmission(addr);
-  //    Wire.write(speed1Reg);
-  //    Wire.write(STOP_SPEED);
-  //    Wire.write(speed2Reg);
-  //    Wire.write(STOP_SPEED);
-  //    delay(timeOn);// Delay turning motors off to achieve desired angle
-  //    Wire.endTransmission();
-  //  }
+  
+    if(timeBased){
+      float midSpeed = (innerSpeedMps + maxSpeedMps) / 2;
+      float distance = 2 * PI * arcRadius * angle / 360;
+      long timeOn = 1000 * distance / midSpeed;
+      delay(timeOn);// Delay turning motors off to achieve desired angle
+      //Stop Motors
+      Wire.beginTransmission(addr);
+      Wire.write(speed1Reg);
+      Wire.write(STOP_SPEED);
+      Wire.endTransmission();
+      Wire.beginTransmission(addr);
+      Wire.write(speed2Reg);
+      Wire.write(STOP_SPEED);
+      Wire.endTransmission();
+    }
   executing = false;
 }
 
@@ -397,6 +404,4 @@ void dropMarker() {
   dropperServo.writeMicroseconds(servoPositions[dropperIndex]); //Set servo to start position
   dropperIndex++; //Increment dropper index
 }
-
-
 
