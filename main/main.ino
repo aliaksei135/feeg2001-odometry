@@ -6,6 +6,7 @@
   @version 1.0
 */
 #include <Wire.h>
+#include <Servo.h>
 
 /* Define I2C bus address, registers and relevant consts
     @see https://www.robot-electronics.co.uk/htm/md25i2c.htm
@@ -22,9 +23,9 @@ const byte enc2Reg = 0x06; //Encoder 2
 //const byte cur2 = 0x0C; //Current to motor 2
 
 //Common Speed Values
-const byte MAX_SPEED = 0xFF;
-const byte STOP_SPEED = 0x80;
-const byte MAX_REVERSE_SPEED = 0x00;
+const byte MAX_SPEED = 0xFF; //255
+const byte STOP_SPEED = 0x80; //128
+const byte MAX_REVERSE_SPEED = 0x00; //00
 
 //Useful Commands
 const byte rstEnc = 0x20; //Reset Encoder Counts
@@ -35,12 +36,13 @@ const byte en2secTo = 0x33; //Enable 2 second motor failsafe
     Units: Base SI
 */
 const float wheelCirc = 0.1;
-const float axisLength = 0.2;
-const float maxSpeedMps = 17.0;
+const float axisLength = 0.26;
+const float maxSpeedMps = 0.56666667;
 
 /* Define path to follow
 
 */
+//Enumerates the possible states of the robot
 enum MotionType {
   Straight,
   PointTurn,
@@ -51,7 +53,7 @@ enum MotionType {
 struct Path {
   MotionType motion;
   float val1;
-  float val2; //Used only for arc distance
+  float val2; //Used only for arc angle
 };
 
 Path course[28] = {
@@ -63,7 +65,7 @@ Path course[28] = {
   {PointTurn, -45, NULL}, //Point 2/12 //Angle not defined well
   {Straight, .300, NULL}, //Distance not defined well
   {PointTurn, 135, NULL}, //Point 11 //Angle not defined well
-  {Arc, 0.180, (27 * PI) / 100},
+  {Arc, 0.180, -270},
   //Drop Point
   {PointTurn, -90, NULL}, //Point 10
   {Straight, 0.180, NULL},
@@ -82,68 +84,100 @@ Path course[28] = {
   {PointTurn, 90, NULL}, //Point 8
   {Straight, 0.260, NULL},
   {PointTurn, -90, NULL}, //Point 4
-  {Arc, 0.260, (-13 * PI) / 100},
+  {Arc, 0.260, -90},
   {PointTurn, 90, NULL}, //Point 3
   {Straight, 0.500, NULL},
   {PointTurn, 45, NULL}, //Point 2/12 //Angle not defined well
-  {Straight, 0.428, NULL},
-  {PointTurn, 720, NULL} //Point 13 //Celebratory spin
+  {Straight, 0.428, NULL}
+  //  {PointTurn, 720, NULL} //Point 13 //Celebratory spin
 };
-int courseIndex = 0;
-int executing = false;
-long requiredEncCount = 0;
-MotionType currentMotion = Stop;
+
+short courseIndex; //An index into the current position through the course array. Can be short as expected range very small
+boolean executing; //Blocking boolean to prevent more than one path segment being active/called. Stops loop() "outpacing" other executing methods
+long requiredEnc1Count; //Desired encoder 1 count for each path segment. Needs to be long as enc count can be up to 32bit
+MotionType currentMotion; //Current motion type the robot is undergoing
+
+/* Dropper definitions */
+Servo dropperServo;
+short servoPositions[6] = {750, 550, 950, 1375, 1800, 2500};
+short dropperIndex;
 
 /* Define Pins */
-const int buzzerPin = 3;
-const int LEDPin = 13;
+const short buzzerPin = 3;
+const short LEDPin = 13;
+const short servoPin = 9;
 
 void setup() {
   Wire.begin(); //Start I2C Bus
   Serial.begin(9600); //Start Serial output at 9600 baud
-  setMode(0x00); //Set mode 0
-  setCmd(ds2secTo); //Disable motor timeout
+  setMode(0); //Set mode 0
+  //  setCmd(ds2secTo); //Disable motor timeout
 
+  //Initialise robot state
+  setCmd(rstEnc); //Reset encoder counts at start
+  courseIndex = 0; //Set first course segment
+  dropperIndex = 0; //Set first dropper index
+  executing = false;
+  requiredEnc1Count = 0;
+  currentMotion = Stop;
+
+  //Set pin modes
   pinMode(buzzerPin, OUTPUT);
   pinMode(LEDPin, OUTPUT);
+  dropperServo.attach(servoPin); //Attach servo to correct pin
+  
 }
 
 void loop() {
-  // Minimise number of blocking calls in loop()
+  //Minimise blocking on loop()
   if (!executing) {
-    if (currentMotion == Straight) {
-      //Straight line, so both encoders should have ~same value
-      if (readEnc1() >= requiredEncCount) {
+    if (currentMotion == Stop) {
+      Serial.println((String)"Executing course idx " + courseIndex);
+      setCmd(rstEnc);
+      executing = true;
+      executePath(course[courseIndex]);
+    } else {
+      if (abs(readEnc1()) >= abs(requiredEnc1Count)) {
+        Serial.println((String)"Encoder 1 count " + readEnc1() + " reached");
+        Serial.println((String)"Encoder 2 count " + readEnc2() + " reached");
         setStraightSpeed(STOP_SPEED);
         currentMotion = Stop;
+        delay(2000);
       }
-    } else {
-      executePath(course[courseIndex]);
     }
   }
 }
 
+/**
+   @brief Executes a given path segment
+
+   @param path Path segment to be executed
+*/
 void executePath(Path path) {
-  executing = true;
   currentMotion = path.motion;
   switch (path.motion) {
     case Straight:
-      requiredEncCount = (path.val1 / wheelCirc) * 360;
+      requiredEnc1Count = (path.val1 / wheelCirc) * 360;
       setStraightSpeed(MAX_SPEED);
+      Serial.println((String)"Straight RE1C " + requiredEnc1Count);
       break;
     case PointTurn:
       setPointTurn(
         abs(path.val1),
-        abs(path.val1) == path.val1);
+        abs(path.val1) == path.val1); //Check if value is negative indicating CCW
       break;
     case Arc:
       setArcTurn(
         path.val1,
-        abs(path.val2) == path.val2,
+        abs(path.val2) == path.val2, //Check if value is negative indicating CCW
         abs(path.val2));
       break;
   }
-  courseIndex++;
+  courseIndex++; //Increment course index for next segment execution
+  if(courseIndex >= 29){ //check if finished course
+    Serial.println("Finished");
+    executing = true; //Block any execution
+  }
 }
 
 /**
@@ -231,9 +265,12 @@ long readEnc2() {
    @param speedval desired speed as byte
 */
 void setStraightSpeed(byte speedVal) {
+  Serial.println((String) "Straight " + speedVal);
   Wire.beginTransmission(addr);
   Wire.write(speed1Reg);
   Wire.write(speedVal);
+  Wire.endTransmission();
+  Wire.beginTransmission(addr);
   Wire.write(speed2Reg);
   Wire.write(speedVal);
   Wire.endTransmission();
@@ -241,40 +278,51 @@ void setStraightSpeed(byte speedVal) {
 }
 
 /**
-   @brief Turns on spot
+   @brief Turn on the spot
 
    @param degToTurn integer number of degrees to turn
    @param clockwise true if arc should be followed in a CW direction, false otherwise
 */
 void setPointTurn(int degToTurn, bool clockwise) {
+  signalWaypoint();
+  Serial.println((String) "Point Turn " + degToTurn + "deg direction clockwise " + clockwise);
   float dist = degToTurn * (PI * axisLength / 360); //Circular path distance each wheel must travel
-  long timeOn = dist / maxSpeedMps;
   if (clockwise) {
+    requiredEnc1Count = dist * 360 / wheelCirc; //Required Encoder count for 1 wheel
     //Start Motors
     Wire.beginTransmission(addr);
     Wire.write(speed1Reg);
     Wire.write(MAX_SPEED);
+    Wire.endTransmission();
+    Wire.beginTransmission(addr);
     Wire.write(speed2Reg);
     Wire.write(MAX_REVERSE_SPEED);
     Wire.endTransmission();
   } else {
+    requiredEnc1Count = -(dist * 360 / wheelCirc); //Required Encoder count for 1 wheel
     //Start Motors
     Wire.beginTransmission(addr);
     Wire.write(speed1Reg);
     Wire.write(MAX_REVERSE_SPEED);
+    Wire.endTransmission();    
+    Wire.beginTransmission(addr);
     Wire.write(speed2Reg);
     Wire.write(MAX_SPEED);
     Wire.endTransmission();
   }
+  Serial.println((String)"Point Turn RE1C " + requiredEnc1Count);
 
-  //Stop Motors
-  Wire.beginTransmission(addr);
-  Wire.write(speed1Reg);
-  Wire.write(STOP_SPEED);
-  Wire.write(speed2Reg);
-  Wire.write(STOP_SPEED);
-  delay(timeOn);// Delay turning motors off to achieve desired angle
-  Wire.endTransmission();
+  //  if(timeBased){
+  //    int timeOn = dist / maxSpeedMps;
+  //    //Stop Motors
+  //    Wire.beginTransmission(addr);
+  //    Wire.write(speed1Reg);
+  //    Wire.write(STOP_SPEED);
+  //    Wire.write(speed2Reg);
+  //    Wire.write(STOP_SPEED);
+  //    delay(timeOn);// Delay turning motors off to achieve desired angle
+  //    Wire.endTransmission();
+  //  }
   executing = false;
 }
 
@@ -283,39 +331,48 @@ void setPointTurn(int degToTurn, bool clockwise) {
 
    @param arcRadius radius of arc followed by midpoint in metres
    @param clockwise true if arc should be followed in a CW direction, false otherwise
-   @param distance distance to travel around arc in metres
+   @param angle angle to sweep in arc
 */
-void setArcTurn(float arcRadius, bool clockwise, float distance) {
+void setArcTurn(float arcRadius, bool clockwise, int angle) {
+  Serial.println((String) "Arc Turn " + arcRadius + "m radius, direction clockwise " + clockwise + " ,angle " + angle);
   float innerSpeedMps = maxSpeedMps * (arcRadius - (axisLength / 2)) / (arcRadius + (axisLength / 2)); //Inner motor speed in m/s
   byte innerSpeed = (byte) 255 / maxSpeedMps * innerSpeedMps; //Inner speed as percentage of max speed scaled to 255 and cast to byte
 
-  float midSpeed = (innerSpeedMps + maxSpeedMps) / 2;
-  long timeOn = distance / midSpeed;
-
   if (clockwise) {
+    requiredEnc1Count = (360 * 2 * PI * (arcRadius + (axisLength / 2))) / wheelCirc;
     Wire.beginTransmission(addr);
     Wire.write(speed1Reg);
     Wire.write(MAX_SPEED);
+    Wire.endTransmission();
+    Wire.beginTransmission(addr);
     Wire.write(speed2Reg);
     Wire.write(innerSpeed);
     Wire.endTransmission();
   } else {
+    requiredEnc1Count = (360 * 2 * PI * (arcRadius - (axisLength / 2))) / wheelCirc;
     Wire.beginTransmission(addr);
     Wire.write(speed1Reg);
     Wire.write(innerSpeed);
+    Wire.endTransmission();
+    Wire.beginTransmission(addr);
     Wire.write(speed2Reg);
     Wire.write(MAX_SPEED);
     Wire.endTransmission();
   }
-
-  //Stop Motors
-  Wire.beginTransmission(addr);
-  Wire.write(speed1Reg);
-  Wire.write(STOP_SPEED);
-  Wire.write(speed2Reg);
-  Wire.write(STOP_SPEED);
-  delay(timeOn);// Delay turning motors off to achieve desired angle
-  Wire.endTransmission();
+  Serial.println((String)"Arc Turn RE1C " + requiredEnc1Count);
+  //
+  //  if(timeBased){
+  //    float midSpeed = (innerSpeedMps + maxSpeedMps) / 2;
+  //    long timeOn = distance / midSpeed;
+  //    //Stop Motors
+  //    Wire.beginTransmission(addr);
+  //    Wire.write(speed1Reg);
+  //    Wire.write(STOP_SPEED);
+  //    Wire.write(speed2Reg);
+  //    Wire.write(STOP_SPEED);
+  //    delay(timeOn);// Delay turning motors off to achieve desired angle
+  //    Wire.endTransmission();
+  //  }
   executing = false;
 }
 
@@ -324,10 +381,22 @@ void setArcTurn(float arcRadius, bool clockwise, float distance) {
    Flash and buzz for 1 second
 */
 void signalWaypoint() {
+  Serial.println("Waypoint reached");
   digitalWrite(buzzerPin, HIGH);
   digitalWrite(LEDPin, HIGH);
-  delay(1000);
+  delay(500);
   digitalWrite(buzzerPin, LOW);
   digitalWrite(LEDPin, LOW);
 }
+
+/**
+   @brief Drop a marker using the servo
+ */
+void dropMarker() {
+  Serial.println((String) "Dropping marker from position " + dropperIndex);
+  dropperServo.writeMicroseconds(servoPositions[dropperIndex]); //Set servo to start position
+  dropperIndex++; //Increment dropper index
+}
+
+
 
